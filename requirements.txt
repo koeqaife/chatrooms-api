@@ -1,0 +1,7 @@
+aiosqlite==0.20.0
+pycryptodome==3.20.0
+pywebio==1.8.3
+tornado==6.4
+typing_extensions==4.10.0
+ua-parser==0.18.0
+user-agents==2.2.0

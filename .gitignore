@@ -1,0 +1,7 @@
+dump.rdb
+env/*
+rooms/*
+__pycache__
+.vscode
+cert.pem
+key.pem
