@@ -15,29 +15,25 @@ from cryptography.fernet import Fernet
 encryption_key = Fernet.generate_key()
 cipher_suite = Fernet(encryption_key)
 
+key_file = ".secret_key.txt"
+
 
 def generate_and_save_secret_key(file_path: str, length: int = 32) -> None:
-    secret_key = os.urandom(length).hex()
-    encrypted_secret_key = cipher_suite.encrypt(secret_key.encode())
-    with open(file_path, 'wb') as file:
-        file.write(encrypted_secret_key)
+    if not os.path.exists(file_path):
+        secret_key = os.urandom(length)
+        with open(file_path, 'wb') as file:
+            file.write(secret_key)
 
 
-def read_secret_key(file_path: str) -> str:
+def read_secret_key(file_path: str) -> bytes:
     with open(file_path, 'rb') as file:
-        encrypted_secret_key = file.read()
-    decrypted_secret_key = cipher_suite.decrypt(encrypted_secret_key).decode()
-    return decrypted_secret_key
+        secret_key = file.read()
+    return secret_key
 
 
-key_file = '.secret_key.txt'
+generate_and_save_secret_key(key_file)
 
-if not os.path.exists(key_file):
-    generate_and_save_secret_key(key_file)
-    secret_key = read_secret_key(key_file)
-else:
-    with open(key_file, 'r') as file:
-        secret_key = read_secret_key(key_file)
+secret_key = read_secret_key(key_file)
 
 
 def generate_random_word(length) -> str:
@@ -84,11 +80,11 @@ def generate_random_word(length) -> str:
 
 
 def sha256(string: str) -> str:
-    return hmac.new(secret_key.encode(), string.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(secret_key, string.encode(), hashlib.sha256).hexdigest()
 
 
 def sha512(string: str) -> str:
-    return hmac.new(secret_key.encode(), string.encode(), hashlib.sha512).hexdigest()
+    return hmac.new(secret_key, string.encode(), hashlib.sha512).hexdigest()
 
 
 def generate_passphrase(count, min_length, max_length) -> str:
@@ -305,7 +301,7 @@ async def create_user(nickname: str, password: str, db: aiosqlite.Connection, sq
 
 async def test():
     try:
-        room = await create_room()
+        room = await create_room("esocia pivey ogug sicuofeu omuacea umeufo yiuw oumeuw eafeimae")
         passphrase = room.passphrase
         loaded_room = await load_room(passphrase)
         id = loaded_room.id
