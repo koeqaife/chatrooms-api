@@ -5,3 +5,4 @@ __pycache__
 .vscode
 cert.pem
 key.pem
+test.py

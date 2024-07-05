@@ -1,4 +1,4 @@
-# 1.1.2
+# 1.1.2 Modified
 import os
 import aiosqlite
 import random
@@ -7,6 +7,7 @@ from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_OAEP
 import hashlib
 import base64
+import asyncio
 
 
 def generate_random_word(length) -> str:
@@ -98,6 +99,41 @@ def decrypt_message(encrypted_message: str | bytes, private_key: bytes | str, pa
     decoded_message = base64.b64decode(encrypted_message)
     decrypted_message = cipher.decrypt(decoded_message)
     return decrypted_message.decode()
+
+
+async def encrypt_message_async(message: bytes | str, public_key: bytes | str, passphrase: str) -> str:
+    if isinstance(message, str):
+        message = message.encode()
+    if isinstance(public_key, str):
+        public_key = public_key.encode()
+    passphrase = sha512(passphrase)
+
+    def encrypt():
+        imported_public_key = RSA.import_key(public_key, passphrase=passphrase)
+        cipher = PKCS1_OAEP.new(imported_public_key)
+        encrypted_message = cipher.encrypt(message)
+        return base64.b64encode(encrypted_message).decode()
+
+    encrypted_message = await asyncio.to_thread(encrypt)
+    return encrypted_message
+
+
+async def decrypt_message_async(encrypted_message: str | bytes, private_key: bytes | str, passphrase: str) -> str:
+    if isinstance(encrypted_message, str):
+        encrypted_message = encrypted_message.encode()
+    if isinstance(private_key, str):
+        private_key = private_key.encode()
+    passphrase = sha512(passphrase)
+
+    def decrypt():
+        imported_private_key = RSA.import_key(private_key, passphrase=passphrase)
+        cipher = PKCS1_OAEP.new(imported_private_key)
+        decoded_message = base64.b64decode(encrypted_message)
+        decrypted_message = cipher.decrypt(decoded_message)
+        return decrypted_message.decode()
+
+    decrypted_message = await asyncio.to_thread(decrypt)
+    return decrypted_message
 
 
 def get_room_id(passphrase: str) -> int:
@@ -278,6 +314,4 @@ async def test():
 
 
 if __name__ == "__main__":
-    import asyncio
-
     asyncio.run(test())

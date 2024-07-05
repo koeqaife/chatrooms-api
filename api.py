@@ -1,3 +1,6 @@
+import json
+import time
+import aiosqlite
 from quart import Quart, jsonify, request
 import logging
 import asyncio
@@ -39,11 +42,16 @@ async def before():
             "message": 'Rate limit exceeded',
             "success": False
         }, 429
-    if not (await check_ip_rate_limit(f"{client_ip}_short", limit=3, interval=5)):
-        return {
-            "message": 'Rate limit exceeded',
-            "success": False
-        }, 429
+
+
+room_is_null = json.dumps({
+    "message": "room is null",
+    "success": False
+}), 400
+password_or_username_is_null = json.dumps({
+    "success": False,
+    "message": "password or username is null"
+}), 400
 
 
 @app.route('/create_room', methods=['POST'])
@@ -57,9 +65,32 @@ async def create_room():
     )
 
 
+async def auth(
+    room_key: str, username: str, password: str
+) -> tuple[tuple | str, tuple[None, None]] | tuple[None, tuple[functions.Room, functions.User]]:
+    if room_key is None:
+        return tuple(room_is_null), (None, None)
+
+    if password is None or username is None:
+        return tuple(password_or_username_is_null), (None, None)
+
+    room = await functions.load_room(room_key)
+
+    if not room.load_success:
+        return (json.dumps({
+            "success": False,
+            "message": "Room doesn't exists"
+        }), 400), (None, None)
+
+    user = functions.User(username, functions.sha256(password))
+    return None, (room, user)
+
+
 @app.route('/get_room', methods=['GET'])
 async def get_room():
     room_key = request.headers.get('room')
+    if room_key is None:
+        return room_is_null
     room = await functions.load_room(room_key)
     return jsonify(
         {
@@ -70,20 +101,20 @@ async def get_room():
     ), 200 if room.load_success else 400
 
 
-@app.route('/create_user', methods=['GET'])
+@app.route('/create_user', methods=['POST'])
 async def create_user():
     room_key = request.headers.get('room')
-    data = await request.get_json()
-    username = data["username"]
-    password = data["password"]
-    room = await functions.load_room(room_key)
-    user = functions.User(username, functions.sha256(password))
 
-    if not room.load_success:
-        return jsonify({
-            "success": False,
-            "message": "Room doesn't exists"
-        }), 400
+    if room_key is None:
+        return room_is_null
+
+    data = (await request.get_json()) or {}
+    username = data.get("username")
+    password = data.get("password")
+    _return, room_and_user = await auth(room_key, username, password)
+    if _return is not None:
+        return _return
+    room, user = room_and_user
 
     async with db_manager.connection_context(functions.room_db(room.id)) as db:
         if (await user.exists(db)):
@@ -92,14 +123,275 @@ async def create_user():
                 "message": "User already exists"
             }), 400
         await functions.create_user(username, password, db)
+        await db.commit()
 
     return jsonify(
         {
-            "key": room.passphrase,
-            "id": room.id,
-            "success": room.load_success
+            "success": True
         }
     )
+
+
+@app.route('/check_user', methods=['GET'])
+async def check_user():
+    room_key = request.headers.get('room')
+
+    if room_key is None:
+        return room_is_null
+
+    data = (await request.get_json()) or {}
+    username = data.get("username")
+    password = data.get("password")
+    _return, room_and_user = await auth(room_key, username, password)
+    if _return is not None:
+        return _return
+    room, user = room_and_user
+
+    async with db_manager.connection_context(functions.room_db(room.id)) as db:
+        if not (await user.exists(db)):
+            return jsonify({
+                "success": False,
+                "message": "User doesn't exists"
+            }), 400
+        if not (await user.check_password(db)):
+            return jsonify({
+                "success": False,
+                "message": "Wrong password"
+            }), 403
+
+    return jsonify(
+        {
+            "success": True
+        }
+    )
+
+
+@app.route('/send_message', methods=['POST'])
+async def send_message():
+    room_key = request.headers.get('room')
+
+    if room_key is None:
+        return room_is_null
+
+    data = (await request.get_json()) or {}
+    username = data.get("username")
+    password = data.get("password")
+    _return, room_and_user = await auth(room_key, username, password)
+    if _return is not None:
+        return _return
+    room, user = room_and_user
+
+    message = data.get("text")
+    if message is None or len(str(message).strip()) == 0:
+        return jsonify({
+            "message": "text cannot be empty",
+            "success": False
+        }), 400
+    try:
+        type = int(data.get("type") or 1)
+    except Exception:
+        type = 1
+
+    async with db_manager.connection_context(functions.room_db(room.id)) as db:
+        db: aiosqlite.Connection  # type: ignore
+        if not (await user.exists(db)):
+            return jsonify({
+                "success": False,
+                "message": "User doesn't exists"
+            }), 400
+        if not (await user.check_password(db)):
+            return jsonify({
+                "success": False,
+                "message": "Wrong password"
+            }), 403
+
+        encrypted_msg = await functions.encrypt_message_async(message, room.public_key, room.passphrase)
+        await db.execute(
+            "INSERT INTO messages (nickname, message, type) VALUES (?, ?, ?)",
+            (user.nickname, encrypted_msg, type)
+        )
+        await db.commit()
+
+    return jsonify(
+        {
+            "success": True
+        }
+    )
+
+
+@app.route('/get_last_messages', methods=['GET'])
+async def get_last_messages():
+    room_key = request.headers.get('room')
+
+    if room_key is None:
+        return room_is_null
+
+    data = (await request.get_json()) or {}
+    username = data.get("username")
+    password = data.get("password")
+    _return, room_and_user = await auth(room_key, username, password)
+    if _return is not None:
+        return _return
+    room, user = room_and_user
+
+    try:
+        after = int(data.get("after_message") or 0)
+    except Exception:
+        after = 0
+
+    async with db_manager.connection_context(functions.room_db(room.id)) as db:
+        db: aiosqlite.Connection  # type: ignore
+        if not (await user.exists(db)):
+            return jsonify({
+                "success": False,
+                "message": "User doesn't exists"
+            }), 400
+        if not (await user.check_password(db)):
+            return jsonify({
+                "success": False,
+                "message": "Wrong password"
+            }), 403
+
+        _msg_count = await db.execute("SELECT COUNT(*) FROM messages WHERE id > ?", (after,))
+        msg_count = min(500, (await _msg_count.fetchone())[0])
+        _messages = await db.execute(
+            f"""
+                SELECT id, nickname, message, created_at, type
+                FROM messages
+                ORDER BY id
+                DESC LIMIT {msg_count}
+            """,
+        )
+        messages_encrypted = list(await _messages.fetchall())
+        messages_encrypted.reverse()
+        messages = []
+        for (id, nickname, message, created_at, type) in messages_encrypted:
+            try:
+                _decrypted = await functions.decrypt_message_async(message, room.private_key, room.passphrase)
+            except ValueError:
+                return jsonify({
+                    "success": False,
+                    "message": "Couldn't decrypt one of the messages"
+                }), 500
+            messages.append({
+                "id": id,
+                "nickname": nickname,
+                "message": _decrypted,
+                "created_at": created_at,
+                "type": type
+            })
+
+    return jsonify({
+        "success": True,
+        "messages": messages
+    })
+
+
+@app.route('/online', methods=['POST'])
+async def online():
+    room_key = request.headers.get('room')
+
+    if room_key is None:
+        return room_is_null
+
+    data = (await request.get_json()) or {}
+    username = data.get("username")
+    password = data.get("password")
+    _return, room_and_user = await auth(room_key, username, password)
+    if _return is not None:
+        return _return
+    room, user = room_and_user
+
+    async with db_manager.connection_context(functions.room_db(room.id)) as db:
+        db: aiosqlite.Connection  # type: ignore
+        if not (await user.exists(db)):
+            return jsonify({
+                "success": False,
+                "message": "User doesn't exists"
+            }), 400
+        if not (await user.check_password(db)):
+            return jsonify({
+                "success": False,
+                "message": "Wrong password"
+            }), 403
+
+        _online = await db.execute(
+            "SELECT nickname, online_timestamp FROM online WHERE nickname = ?",
+            (user.nickname,)
+        )
+        if (await _online.fetchone()) is not None:
+            await db.execute(
+                "UPDATE online SET online_timestamp = ? WHERE nickname = ?",
+                (time.time(), user.nickname)
+            )
+        else:
+            await db.execute(
+                "INSERT INTO online (nickname, online_timestamp) VALUES (?, ?)",
+                (user.nickname, time.time())
+            )
+        await db.commit()
+
+    return jsonify({
+        "success": True,
+    })
+
+
+@app.route('/online_list', methods=['GET'])
+async def online_list():
+    room_key = request.headers.get('room')
+
+    if room_key is None:
+        return room_is_null
+
+    data = (await request.get_json()) or {}
+    username = data.get("username")
+    password = data.get("password")
+    _return, room_and_user = await auth(room_key, username, password)
+    if _return is not None:
+        return _return
+    room, user = room_and_user
+
+    async with db_manager.connection_context(functions.room_db(room.id)) as db:
+        db: aiosqlite.Connection  # type: ignore
+        if not (await user.exists(db)):
+            return jsonify({
+                "success": False,
+                "message": "User doesn't exists"
+            }), 400
+        if not (await user.check_password(db)):
+            return jsonify({
+                "success": False,
+                "message": "Wrong password"
+            }), 403
+
+        _online = await db.execute(
+            """
+                SELECT nickname, online_timestamp FROM online
+                WHERE online_timestamp > (strftime('%s', 'now') - 15)
+                LIMIT 101
+            """,
+        )
+        _online_list = await _online.fetchall()
+        _online_count = await db.execute(
+            """
+                SELECT COUNT(*) FROM online
+                WHERE online_timestamp > (strftime('%s', 'now') - 15)
+            """,
+        )
+        online_count = (await _online_count.fetchone()) or 0
+        online_list = []
+        for nickname, online_timestamp in _online_list:
+            online_list.append({
+                "nickname": nickname,
+                "timestamp": online_timestamp
+            })
+
+    return jsonify({
+        "success": True,
+        "hidden": online_count[0] > 100,
+        "online": online_list,
+        "online_count": online_count[0]
+    })
 
 
 @app.route('/ping', methods=['GET'])
