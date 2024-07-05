@@ -9,22 +9,35 @@ import hashlib
 import base64
 import asyncio
 import hmac
+from cryptography.fernet import Fernet
 
 
-def generate_and_save_secret_key(file_path: str, length: int = 32) -> str:
+encryption_key = Fernet.generate_key()
+cipher_suite = Fernet(encryption_key)
+
+
+def generate_and_save_secret_key(file_path: str, length: int = 32) -> None:
     secret_key = os.urandom(length).hex()
-    with open(file_path, 'w') as file:
-        file.write(secret_key)
-    return secret_key
+    encrypted_secret_key = cipher_suite.encrypt(secret_key.encode())
+    with open(file_path, 'wb') as file:
+        file.write(encrypted_secret_key)
 
 
-key_file = 'secret_key.txt'
+def read_secret_key(file_path: str) -> str:
+    with open(file_path, 'rb') as file:
+        encrypted_secret_key = file.read()
+    decrypted_secret_key = cipher_suite.decrypt(encrypted_secret_key).decode()
+    return decrypted_secret_key
+
+
+key_file = '.secret_key.txt'
 
 if not os.path.exists(key_file):
-    secret_key = generate_and_save_secret_key(key_file)
+    generate_and_save_secret_key(key_file)
+    secret_key = read_secret_key(key_file)
 else:
     with open(key_file, 'r') as file:
-        secret_key = file.read()
+        secret_key = read_secret_key(key_file)
 
 
 def generate_random_word(length) -> str:

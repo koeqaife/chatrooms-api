@@ -6,4 +6,4 @@ __pycache__
 cert.pem
 key.pem
 test.py
-secret_key.txt
+.secret_key.txt
