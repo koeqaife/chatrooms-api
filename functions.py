@@ -8,6 +8,23 @@ from Crypto.Cipher import PKCS1_OAEP
 import hashlib
 import base64
 import asyncio
+import hmac
+
+
+def generate_and_save_secret_key(file_path: str, length: int = 32) -> str:
+    secret_key = os.urandom(length).hex()
+    with open(file_path, 'w') as file:
+        file.write(secret_key)
+    return secret_key
+
+
+key_file = 'secret_key.txt'
+
+if not os.path.exists(key_file):
+    secret_key = generate_and_save_secret_key(key_file)
+else:
+    with open(key_file, 'r') as file:
+        secret_key = file.read()
 
 
 def generate_random_word(length) -> str:
@@ -54,11 +71,11 @@ def generate_random_word(length) -> str:
 
 
 def sha256(string: str) -> str:
-    return hashlib.sha256(string.encode()).hexdigest()
+    return hmac.new(secret_key.encode(), string.encode(), hashlib.sha256).hexdigest()
 
 
 def sha512(string: str) -> str:
-    return hashlib.sha512(string.encode()).hexdigest()
+    return hmac.new(secret_key.encode(), string.encode(), hashlib.sha512).hexdigest()
 
 
 def generate_passphrase(count, min_length, max_length) -> str:
@@ -198,6 +215,7 @@ async def room_database(db: aiosqlite.Connection):
 
 
 async def create_room(passphrase: str | None = None, prefix: str | None = None) -> Room:
+    prefix = prefix or ""
     passphrase = passphrase or f"{prefix}{generate_passphrase(9, 3, 8)}"
     passphrase_sha512 = sha512(passphrase)
     id = get_room_id(passphrase)
