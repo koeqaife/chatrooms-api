@@ -301,7 +301,7 @@ async def create_user(nickname: str, password: str, db: aiosqlite.Connection, sq
 
 async def test():
     try:
-        room = await create_room("esocia pivey ogug sicuofeu omuacea umeufo yiuw oumeuw eafeimae")
+        room = await create_room()
         passphrase = room.passphrase
         loaded_room = await load_room(passphrase)
         id = loaded_room.id
@@ -328,7 +328,7 @@ async def test():
             check_password2 = await user2.check_password(db)
 
             users_test = "Passed" if user_exists and check_password and not check_password2 else "Failed"
-            print(f"User system test: {users_test}")
+            print(f"Auth test: {users_test}")
 
         input("\nPress Enter to exit")
     finally:
