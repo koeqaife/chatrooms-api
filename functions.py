@@ -1,10 +1,11 @@
-# 1.1.2 Modified
+# 1.2
 import os
 import aiosqlite
 import random
 import re
 from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP
+from Crypto.Cipher import PKCS1_OAEP, AES
+from Crypto.Util.Padding import pad, unpad
 import hashlib
 import base64
 import asyncio
@@ -102,64 +103,67 @@ def generate_rsa_key(passphrase: str) -> tuple[bytes, bytes]:
     return encrypted_key, public_key
 
 
+def generate_aes_key() -> bytes:
+    return os.urandom(32)
+
+
+def aes_encrypt(message: bytes, key: bytes) -> bytes:
+    cipher = AES.new(key, AES.MODE_CBC)
+    ct_bytes = cipher.encrypt(pad(message, AES.block_size))
+    return base64.b64encode(cipher.iv + ct_bytes)  # type: ignore
+
+
+def aes_decrypt(encrypted_message: bytes, key: bytes) -> bytes:
+    encrypted_message = base64.b64decode(encrypted_message)
+    iv = encrypted_message[:AES.block_size]
+    ct = encrypted_message[AES.block_size:]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    return unpad(cipher.decrypt(ct), AES.block_size)
+
+
 def encrypt_message(message: bytes | str, public_key: bytes | str, passphrase: str) -> str:
     if isinstance(message, str):
         message = message.encode()
     if isinstance(public_key, str):
         public_key = public_key.encode()
-    passphrase = sha512(passphrase)
-    imported_public_key = RSA.import_key(public_key, passphrase=passphrase)
-    cipher = PKCS1_OAEP.new(imported_public_key)
-    encrypted_message = cipher.encrypt(message)
-    return base64.b64encode(encrypted_message).decode()
+    _passphrase = sha512(passphrase)
+
+    aes_key = generate_aes_key()
+
+    encrypted_message = aes_encrypt(message, aes_key)
+
+    imported_public_key = RSA.import_key(public_key, passphrase=_passphrase)
+    cipher_rsa = PKCS1_OAEP.new(imported_public_key)
+    encrypted_aes_key = cipher_rsa.encrypt(aes_key)
+
+    return base64.b64encode(encrypted_aes_key + encrypted_message).decode()
 
 
 def decrypt_message(encrypted_message: str | bytes, private_key: bytes | str, passphrase: str) -> str:
     if isinstance(encrypted_message, str):
-        encrypted_message = encrypted_message.encode()
+        encrypted_message = base64.b64decode(encrypted_message)
     if isinstance(private_key, str):
         private_key = private_key.encode()
-    passphrase = sha512(passphrase)
-    imported_private_key = RSA.import_key(private_key, passphrase=passphrase)
-    cipher = PKCS1_OAEP.new(imported_private_key)
-    decoded_message = base64.b64decode(encrypted_message)
-    decrypted_message = cipher.decrypt(decoded_message)
+    _passphrase = sha512(passphrase)
+
+    encrypted_aes_key = encrypted_message[:256]
+    encrypted_message = encrypted_message[256:]
+
+    imported_private_key = RSA.import_key(private_key, passphrase=_passphrase)
+    cipher_rsa = PKCS1_OAEP.new(imported_private_key)
+    aes_key = cipher_rsa.decrypt(encrypted_aes_key)
+
+    decrypted_message = aes_decrypt(encrypted_message, aes_key)
+
     return decrypted_message.decode()
 
 
 async def encrypt_message_async(message: bytes | str, public_key: bytes | str, passphrase: str) -> str:
-    if isinstance(message, str):
-        message = message.encode()
-    if isinstance(public_key, str):
-        public_key = public_key.encode()
-    passphrase = sha512(passphrase)
-
-    def encrypt():
-        imported_public_key = RSA.import_key(public_key, passphrase=passphrase)
-        cipher = PKCS1_OAEP.new(imported_public_key)
-        encrypted_message = cipher.encrypt(message)
-        return base64.b64encode(encrypted_message).decode()
-
-    encrypted_message = await asyncio.to_thread(encrypt)
-    return encrypted_message
+    return await asyncio.to_thread(encrypt_message, message, public_key, passphrase)
 
 
 async def decrypt_message_async(encrypted_message: str | bytes, private_key: bytes | str, passphrase: str) -> str:
-    if isinstance(encrypted_message, str):
-        encrypted_message = encrypted_message.encode()
-    if isinstance(private_key, str):
-        private_key = private_key.encode()
-    passphrase = sha512(passphrase)
-
-    def decrypt():
-        imported_private_key = RSA.import_key(private_key, passphrase=passphrase)
-        cipher = PKCS1_OAEP.new(imported_private_key)
-        decoded_message = base64.b64decode(encrypted_message)
-        decrypted_message = cipher.decrypt(decoded_message)
-        return decrypted_message.decode()
-
-    decrypted_message = await asyncio.to_thread(decrypt)
-    return decrypted_message
+    return await asyncio.to_thread(decrypt_message, encrypted_message, private_key, passphrase)
 
 
 def get_room_id(passphrase: str) -> int:
@@ -315,6 +319,12 @@ async def test():
         decrypted = decrypt_message(encrypted, loaded_room.private_key, passphrase)
         encryption_test = "Passed" if decrypted == message else "Failed"
         print(f"\nEncryption test: {encryption_test}")
+
+        message = generate_passphrase(100, 1, 5)
+        encrypted = encrypt_message(message, room.public_key, passphrase)
+        decrypted = decrypt_message(encrypted, loaded_room.private_key, passphrase)
+        encryption_test = "Passed" if decrypted == message else "Failed"
+        print(f"Encryption test 2: {encryption_test}")
 
         async with aiosqlite.connect(room_db(id)) as db:
             nickname = generate_random_word(7)
