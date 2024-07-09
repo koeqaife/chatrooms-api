@@ -28,9 +28,10 @@ async def check_ip_rate_limit(_key: str | None, limit=30, interval=60):
         return False
     key = f'rate_limit:{_key}'
     current_count = redis.incr(key)
+    if current_count == 1:
+        redis.expire(key, interval)
     if current_count > limit:
         return False
-    redis.expire(key, interval)
     return True
 
 
