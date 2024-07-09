@@ -9,7 +9,7 @@ import functions
 from redis import Redis
 import traceback
 
-VERSION = 2
+VERSION = 3
 db_manager = core.AsyncDatabaseConnectionManager()
 
 core.init_logging(logging.INFO, True, True, other_logs=True)
@@ -442,7 +442,7 @@ async def ping():
 async def info():
     return jsonify({
         "success": True,
-        "rate_limit": config["rate_limit"],
+        "max_rate_limit": config["rate_limit"],
         "version": VERSION
     })
 

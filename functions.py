@@ -1,5 +1,6 @@
-# 1.2
+# 1.3
 import os
+import string
 import aiosqlite
 import random
 import re
@@ -166,16 +167,48 @@ async def decrypt_message_async(encrypted_message: str | bytes, private_key: byt
     return await asyncio.to_thread(decrypt_message, encrypted_message, private_key, passphrase)
 
 
+def generate_chars():
+    digits = string.digits
+    base61_chars = digits + string.ascii_letters + punctuation()
+    return base61_chars
+
+
+def punctuation():
+    unwanted_chars = "/\\:*?\"<>|-"
+    valid_punctuation = ''.join(c for c in string.punctuation if c not in unwanted_chars)
+    return valid_punctuation
+
+
+def compress_int(num: int):
+    if num == 0:
+        return '0'
+
+    chars = generate_chars()
+    output = ''
+    is_negative = num < 0
+    num = abs(num)
+
+    while num > 0:
+        output = chars[num % len(chars)] + output
+        num //= len(chars)
+
+    if is_negative:
+        output = '-' + output
+
+    return output
+
+
 def get_room_id(passphrase: str) -> int:
     passphrase = sha512(passphrase)
-    return random.Random(passphrase).randint(0, 10**25)
+    return random.Random(passphrase).randint(-2**128, 2**128)
 
 
 def room_db(id: int) -> str:
     folder = './rooms/'
+    _id = compress_int(id)
     if not os.path.exists(folder):
         os.makedirs(folder)
-    return f"{folder}{id}.db"
+    return f"{folder}{_id}.db"
 
 
 class Room():
