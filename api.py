@@ -37,11 +37,17 @@ async def check_ip_rate_limit(_key: str | None, limit=30, interval=60):
 @app.before_request
 async def before():
     client_ip = request.remote_addr
-    if not (await check_ip_rate_limit(client_ip, limit=45)):
-        return {
-            "message": 'Rate limit exceeded',
-            "success": False
-        }, 429
+    if "bypass" in request.headers:
+        rate_limit_bypass = request.headers["bypass"]
+    else:
+        rate_limit_bypass = None
+    if not str(functions.secret_key) == rate_limit_bypass:
+        if not (await check_ip_rate_limit(client_ip, limit=45)):
+            return {
+                "message": 'Rate limit exceeded',
+                "success": False,
+                "rate_limit": True
+            }, 429
 
 
 room_is_null = json.dumps({
@@ -60,13 +66,14 @@ async def create_room():
     return jsonify(
         {
             "key": new_room.passphrase,
-            "id": new_room.id
+            "id": new_room.id,
+            "success": True
         }
     )
 
 
 async def auth(
-    room_key: str, username: str, password: str
+    room_key: str | None, username: str | None, password: str | None
 ) -> tuple[tuple | str, tuple[None, None]] | tuple[None, tuple[functions.Room, functions.User]]:
     if room_key is None:
         return tuple(room_is_null), (None, None)
