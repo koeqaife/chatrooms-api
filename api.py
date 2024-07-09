@@ -7,20 +7,51 @@ import asyncio
 import core
 import functions
 from redis import Redis
+import traceback
 
+VERSION = 2
 db_manager = core.AsyncDatabaseConnectionManager()
-redis = Redis(host='localhost', port=6379, db=0)
 
 core.init_logging(logging.INFO, True, True, other_logs=True)
 LOGGER = logging.getLogger("api")
 core.warn_if_not_optimized(False)
 config = {
     "ip": "0.0.0.0",
-    "port": 1111
+    "port": 1111,
+    "redis": "localhost",
+    "redis_port": 6379,
+    "rate_limit": 45
 }
+try:
+    with open("./config.json") as f:
+        config.update(json.load(f))
+except Exception:
+    traceback.print_exc()
+
 session_prefix = core.new_session_prefix()
 
+redis = Redis(host=config["redis"], port=config["redis_port"], db=0)
 app = Quart(__name__)
+
+
+@app.errorhandler(500)
+async def handle_500(error):
+    traceback.print_exc()
+    response = {
+        "message": "Internal Server Error",
+        "success": False
+    }
+    return jsonify(response), 500
+
+
+@app.errorhandler(Exception)
+async def handle_exception(error):
+    traceback.print_exc()
+    response = {
+        "message": "Server Error",
+        "success": False
+    }
+    return jsonify(response), 500
 
 
 async def check_ip_rate_limit(_key: str | None, limit=30, interval=60):
@@ -43,7 +74,7 @@ async def before():
     else:
         rate_limit_bypass = None
     if not str(functions.secret_key) == rate_limit_bypass:
-        if not (await check_ip_rate_limit(client_ip, limit=45)):
+        if not (await check_ip_rate_limit(client_ip, limit=config["rate_limit"])):
             return {
                 "message": 'Rate limit exceeded',
                 "success": False,
@@ -405,6 +436,15 @@ async def online_list():
 @app.route('/ping', methods=['GET'])
 async def ping():
     return "Pong!", 200
+
+
+@app.route('/info', methods=['GET'])
+async def info():
+    return jsonify({
+        "success": True,
+        "rate_limit": config["rate_limit"],
+        "version": VERSION
+    })
 
 
 async def main_task():

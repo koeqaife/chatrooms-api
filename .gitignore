@@ -7,3 +7,4 @@ cert.pem
 key.pem
 test.py
 .secret_key.txt
+config.json
