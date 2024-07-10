@@ -150,6 +150,25 @@ class AsyncDatabaseConnectionManager:
             await conn_info["connection"].close()
         self.connections.clear()
 
+    @staticmethod
+    async def actions_before_close(db: aiosqlite.Connection):
+        await db.executescript(
+            """
+                CREATE TEMPORARY TABLE temp_keep_ids AS
+                SELECT id
+                FROM messages
+                ORDER BY id DESC
+                LIMIT 500;
+
+                DELETE FROM messages
+                WHERE id NOT IN (SELECT id FROM temp_keep_ids);
+
+                DROP TABLE temp_keep_ids;
+            """
+        )
+        print("a")
+        await db.commit()
+
     async def cleanup_connections(self, timeout=600):
         while True:
             await asyncio.sleep(timeout)
@@ -159,5 +178,6 @@ class AsyncDatabaseConnectionManager:
                 if now - conn_info["last_used"] > timedelta(seconds=timeout):
                     to_close.append(db_name)
             for db_name in to_close:
+                await self.actions_before_close(self.connections[db_name]["connection"])
                 await self.connections[db_name]["connection"].close()
                 del self.connections[db_name]
