@@ -9,7 +9,7 @@ import functions
 from redis import Redis
 import traceback
 
-VERSION = 3
+VERSION = 4
 db_manager = core.AsyncDatabaseConnectionManager()
 
 core.init_logging(logging.INFO, True, True, other_logs=True)
@@ -20,7 +20,7 @@ config = {
     "port": 1111,
     "redis": "localhost",
     "redis_port": 6379,
-    "rate_limit": 45
+    "rate_limit": 60
 }
 try:
     with open("./config.json") as f:
@@ -55,6 +55,7 @@ async def handle_exception(error):
 
 
 async def check_ip_rate_limit(_key: str | None, limit=30, interval=60):
+    # return True
     if _key is None:
         return False
     key = f'rate_limit:{_key}'
@@ -292,7 +293,7 @@ async def get_last_messages():
             }), 403
 
         _msg_count = await db.execute("SELECT COUNT(*) FROM messages WHERE id > ?", (after,))
-        msg_count = min(500, (await _msg_count.fetchone())[0])
+        msg_count = min(100, (await _msg_count.fetchone())[0])
         _messages = await db.execute(
             f"""
                 SELECT id, nickname, message, created_at, type
@@ -304,21 +305,26 @@ async def get_last_messages():
         messages_encrypted = list(await _messages.fetchall())
         messages_encrypted.reverse()
         messages = []
-        for (id, nickname, message, created_at, type) in messages_encrypted:
-            try:
+
+        async def decrypt_messages():
+            for (id, nickname, message, created_at, type) in messages_encrypted:
                 _decrypted = await functions.decrypt_message_async(message, room.private_key, room.passphrase)
-            except ValueError:
-                return jsonify({
-                    "success": False,
-                    "message": "Couldn't decrypt one of the messages"
-                }), 500
-            messages.append({
-                "id": id,
-                "nickname": nickname,
-                "message": _decrypted,
-                "created_at": created_at,
-                "type": type
-            })
+                yield (id, nickname, _decrypted, created_at, type)
+
+        try:
+            async for (id, nickname, message, created_at, type) in decrypt_messages():
+                messages.append({
+                    "id": id,
+                    "nickname": nickname,
+                    "message": message,
+                    "created_at": created_at,
+                    "type": type
+                })
+        except ValueError:
+            return jsonify({
+                "success": False,
+                "message": "Couldn't decrypt one of the messages"
+            }), 500
 
     return jsonify({
         "success": True,

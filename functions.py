@@ -1,17 +1,18 @@
-# 1.3
+# 1.4
 import os
 import string
 import aiosqlite
 import random
 import re
 from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP, AES
-from Crypto.Util.Padding import pad, unpad
+from Crypto.Cipher import PKCS1_OAEP
 import hashlib
 import base64
 import asyncio
 import hmac
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 
 
 encryption_key = Fernet.generate_key()
@@ -109,17 +110,22 @@ def generate_aes_key() -> bytes:
 
 
 def aes_encrypt(message: bytes, key: bytes) -> bytes:
-    cipher = AES.new(key, AES.MODE_CBC)
-    ct_bytes = cipher.encrypt(pad(message, AES.block_size))
-    return base64.b64encode(cipher.iv + ct_bytes)  # type: ignore
+    backend = default_backend()
+    iv = os.urandom(16)
+    cipher = Cipher(algorithms.AES(key), modes.CFB(iv), backend=backend)
+    encryptor = cipher.encryptor()
+    ct_bytes = encryptor.update(message) + encryptor.finalize()
+    return base64.b64encode(iv + ct_bytes)
 
 
 def aes_decrypt(encrypted_message: bytes, key: bytes) -> bytes:
+    backend = default_backend()
     encrypted_message = base64.b64decode(encrypted_message)
-    iv = encrypted_message[:AES.block_size]
-    ct = encrypted_message[AES.block_size:]
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    return unpad(cipher.decrypt(ct), AES.block_size)
+    iv = encrypted_message[:16]
+    ct = encrypted_message[16:]
+    cipher = Cipher(algorithms.AES(key), modes.CFB(iv), backend=backend)
+    decryptor = cipher.decryptor()
+    return decryptor.update(ct) + decryptor.finalize()
 
 
 def encrypt_message(message: bytes | str, public_key: bytes | str, passphrase: str) -> str:
