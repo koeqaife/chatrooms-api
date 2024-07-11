@@ -1,3 +1,4 @@
+from concurrent.futures import ProcessPoolExecutor as Executor
 import json
 import time
 import aiosqlite
@@ -9,7 +10,7 @@ import functions
 from redis import Redis
 import traceback
 
-VERSION = 4
+VERSION = 5
 db_manager = core.AsyncDatabaseConnectionManager()
 
 core.init_logging(logging.INFO, True, True, other_logs=True)
@@ -278,6 +279,13 @@ async def get_last_messages():
         after = int(data.get("after_message") or 0)
     except Exception:
         after = 0
+    after = max(after, 0)
+
+    try:
+        limit = int(data.get("limit") or 100)
+    except Exception:
+        limit = 100
+    limit = max(min(100, limit), 0)
 
     async with db_manager.connection_context(functions.room_db(room.id)) as db:
         db: aiosqlite.Connection  # type: ignore
@@ -293,13 +301,13 @@ async def get_last_messages():
             }), 403
 
         _msg_count = await db.execute("SELECT COUNT(*) FROM messages WHERE id > ?", (after,))
-        msg_count = min(100, (await _msg_count.fetchone())[0])
+        msg_count = (await _msg_count.fetchone())[0]
         _messages = await db.execute(
             f"""
                 SELECT id, nickname, message, created_at, type
                 FROM messages
                 ORDER BY id
-                DESC LIMIT {msg_count}
+                DESC LIMIT {min(msg_count, limit)}
             """,
         )
         messages_encrypted = list(await _messages.fetchall())
@@ -307,9 +315,34 @@ async def get_last_messages():
         messages = []
 
         async def decrypt_messages():
-            for (id, nickname, message, created_at, type) in messages_encrypted:
-                _decrypted = await functions.decrypt_message_async(message, room.private_key, room.passphrase)
-                yield (id, nickname, _decrypted, created_at, type)
+            loop = asyncio.get_event_loop()
+            with Executor(max_workers=2) as executor:
+                queue = asyncio.Queue()
+
+                async def decrypt_and_enqueue(message_data):
+                    id, nickname, message, created_at, type = message_data
+                    decrypted = await loop.run_in_executor(
+                        executor,
+                        functions.decrypt_message,
+                        message,
+                        room.private_key,
+                        room.passphrase
+                    )
+                    await queue.put((id, nickname, decrypted, created_at, type))
+
+                tasks = [decrypt_and_enqueue(message_data) for message_data in messages_encrypted]
+                await asyncio.gather(*tasks)
+
+                for _ in range(len(messages_encrypted)):
+                    yield await queue.get()
+
+        # async def decrypt_messages():
+        #     loop = asyncio.get_event_loop()
+        #     with functions.ProcessPoolExecutor(max_workers=8) as executor:
+        #         for (id, nickname, message, created_at, type) in messages_encrypted:
+        #             f = loop.run_in_executor(executor, functions.decrypt_message, message, room.private_key, room.passphrase)
+        #             _decrypted = await f
+        #             yield (id, nickname, _decrypted, created_at, type)
 
         try:
             async for (id, nickname, message, created_at, type) in decrypt_messages():
@@ -320,6 +353,7 @@ async def get_last_messages():
                     "created_at": created_at,
                     "type": type
                 })
+            messages = sorted(messages, key=lambda x: x["id"])
         except ValueError:
             return jsonify({
                 "success": False,

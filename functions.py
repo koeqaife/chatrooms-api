@@ -1,11 +1,11 @@
-# 1.4
+# 1.5
+from concurrent.futures import ProcessPoolExecutor
+from functools import lru_cache
 import os
 import string
 import aiosqlite
 import random
 import re
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_OAEP
 import hashlib
 import base64
 import asyncio
@@ -13,12 +13,18 @@ import hmac
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
+import multiprocessing as mp
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives import hashes, serialization
 
+# mp.set_start_method('spawn')
+mp.set_start_method('spawn', force=True)
+executor = ProcessPoolExecutor()
 
 encryption_key = Fernet.generate_key()
 cipher_suite = Fernet(encryption_key)
 
-key_file = ".secret_key.txt"
+key_file = ".secret_key"
 
 
 def generate_and_save_secret_key(file_path: str, length: int = 32) -> None:
@@ -96,13 +102,21 @@ def generate_passphrase(count, min_length, max_length) -> str:
 
 
 def generate_rsa_key(passphrase: str) -> tuple[bytes, bytes]:
-    passphrase = sha512(passphrase)
-    key = RSA.generate(2048)
-    encrypted_key = key.export_key(passphrase=passphrase, pkcs=8,
-                                   protection="scryptAndAES128-CBC")
-    public_key = key.publickey().export_key(passphrase=passphrase, pkcs=8,
-                                            protection="scryptAndAES128-CBC")
-    return encrypted_key, public_key
+    _passphrase = sha512(passphrase).encode()
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    private_key = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.BestAvailableEncryption(_passphrase)
+    )
+
+    public_key = key.public_key().public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+    return private_key, public_key
 
 
 def generate_aes_key() -> bytes:
@@ -110,20 +124,16 @@ def generate_aes_key() -> bytes:
 
 
 def aes_encrypt(message: bytes, key: bytes) -> bytes:
-    backend = default_backend()
     iv = os.urandom(16)
-    cipher = Cipher(algorithms.AES(key), modes.CFB(iv), backend=backend)
-    encryptor = cipher.encryptor()
-    ct_bytes = encryptor.update(message) + encryptor.finalize()
-    return base64.b64encode(iv + ct_bytes)
+    encryptor = Cipher(algorithms.AES(key), modes.GCM(iv), backend=default_backend()).encryptor()
+    ct = encryptor.update(message) + encryptor.finalize()
+    return base64.b64encode(iv + encryptor.tag + ct)
 
 
 def aes_decrypt(encrypted_message: bytes, key: bytes) -> bytes:
-    backend = default_backend()
     encrypted_message = base64.b64decode(encrypted_message)
-    iv = encrypted_message[:16]
-    ct = encrypted_message[16:]
-    cipher = Cipher(algorithms.AES(key), modes.CFB(iv), backend=backend)
+    iv, tag, ct = encrypted_message[:16], encrypted_message[16:32], encrypted_message[32:]
+    cipher = Cipher(algorithms.AES(key), modes.GCM(iv, tag), backend=default_backend())
     decryptor = cipher.decryptor()
     return decryptor.update(ct) + decryptor.finalize()
 
@@ -133,17 +143,27 @@ def encrypt_message(message: bytes | str, public_key: bytes | str, passphrase: s
         message = message.encode()
     if isinstance(public_key, str):
         public_key = public_key.encode()
-    _passphrase = sha512(passphrase)
+    # _passphrase = sha512(passphrase).encode()
 
     aes_key = generate_aes_key()
-
     encrypted_message = aes_encrypt(message, aes_key)
 
-    imported_public_key = RSA.import_key(public_key, passphrase=_passphrase)
-    cipher_rsa = PKCS1_OAEP.new(imported_public_key)
-    encrypted_aes_key = cipher_rsa.encrypt(aes_key)
+    imported_public_key = serialization.load_pem_public_key(public_key, backend=default_backend())
+    encrypted_aes_key = imported_public_key.encrypt(  # type: ignore
+        aes_key,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
 
     return base64.b64encode(encrypted_aes_key + encrypted_message).decode()
+
+
+@lru_cache(maxsize=4)
+def load_private_key(private_key: bytes, passphrase: bytes):
+    return serialization.load_pem_private_key(private_key, password=passphrase, backend=default_backend())
 
 
 def decrypt_message(encrypted_message: str | bytes, private_key: bytes | str, passphrase: str) -> str:
@@ -151,14 +171,21 @@ def decrypt_message(encrypted_message: str | bytes, private_key: bytes | str, pa
         encrypted_message = base64.b64decode(encrypted_message)
     if isinstance(private_key, str):
         private_key = private_key.encode()
-    _passphrase = sha512(passphrase)
+    _passphrase = sha512(passphrase).encode()
 
     encrypted_aes_key = encrypted_message[:256]
     encrypted_message = encrypted_message[256:]
 
-    imported_private_key = RSA.import_key(private_key, passphrase=_passphrase)
-    cipher_rsa = PKCS1_OAEP.new(imported_private_key)
-    aes_key = cipher_rsa.decrypt(encrypted_aes_key)
+    imported_private_key = load_private_key(private_key, _passphrase)
+
+    aes_key = imported_private_key.decrypt(  # type: ignore
+        encrypted_aes_key,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
 
     decrypted_message = aes_decrypt(encrypted_message, aes_key)
 
@@ -166,11 +193,13 @@ def decrypt_message(encrypted_message: str | bytes, private_key: bytes | str, pa
 
 
 async def encrypt_message_async(message: bytes | str, public_key: bytes | str, passphrase: str) -> str:
-    return await asyncio.to_thread(encrypt_message, message, public_key, passphrase)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, encrypt_message, message, public_key, passphrase)
 
 
 async def decrypt_message_async(encrypted_message: str | bytes, private_key: bytes | str, passphrase: str) -> str:
-    return await asyncio.to_thread(decrypt_message, encrypted_message, private_key, passphrase)
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, decrypt_message, encrypted_message, private_key, passphrase)
 
 
 def generate_chars():
@@ -300,9 +329,11 @@ async def load_room(passphrase: str) -> Room:
         public_key, private_key = encryption[0], encryption[1]
         message = 'Test key 123'
         try:
-            encrypted = encrypt_message(message, public_key, passphrase)
-            decrypted = decrypt_message(encrypted, private_key, passphrase)
+            encrypted = await encrypt_message_async(message, public_key, passphrase)
+            decrypted = await decrypt_message_async(encrypted, private_key, passphrase)
         except TypeError:
+            return UnknownRoom()
+        except ValueError:
             return UnknownRoom()
         if decrypted != message:
             return UnknownRoom()
