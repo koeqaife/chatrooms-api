@@ -1,5 +1,6 @@
 # 1.5
 from concurrent.futures import ProcessPoolExecutor
+import enum
 from functools import lru_cache
 import os
 import string
@@ -161,7 +162,7 @@ def encrypt_message(message: bytes | str, public_key: bytes | str, passphrase: s
     return base64.b64encode(encrypted_aes_key + encrypted_message).decode()
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=16)
 def load_private_key(private_key: bytes, passphrase: bytes):
     return serialization.load_pem_private_key(private_key, password=passphrase, backend=default_backend())
 
@@ -264,6 +265,13 @@ class UnknownRoom(Room):
         self.load_success = False
 
 
+class MessageTypes(enum.IntEnum):
+    DEFAULT = 1
+    NOT_ENCRYPTED = 2
+    SYSTEM = 3
+    EPHEMERAL = 4
+
+
 async def room_database(db: aiosqlite.Connection):
     sql = await db.cursor()
     await sql.executescript(
@@ -274,8 +282,10 @@ async def room_database(db: aiosqlite.Connection):
             passphrase_sha512 TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS accounts (
-            nickname TEXT PRIMARY KEY,
-            password_sha256 TEXT NOT NULL
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nickname TEXT SECONDARY KEY,
+            password_sha256 TEXT NOT NULL,
+            accepted SMALLINT DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -283,14 +293,18 @@ async def room_database(db: aiosqlite.Connection):
             message TEXT NOT NULL,
             attachment TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            type INTEGER DEFAULT 1,
+            type INTEGER DEFAULT 0,
             FOREIGN KEY (nickname) REFERENCES accounts(nickname)
         );
         CREATE TABLE IF NOT EXISTS online (
             nickname TEXT,
             online_timestamp INTEGER,
             FOREIGN KEY (nickname) REFERENCES accounts(nickname)
-        )
+        );
+        CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
         """
     )
 
@@ -362,13 +376,35 @@ class User():
         )).fetchone()
         return (user is not None)
 
+    async def can_join(self, db: aiosqlite.Connection) -> bool:
+        sql = await db.cursor()
+        user = await (await sql.execute(
+            "SELECT * FROM accounts WHERE nickname = ? AND (accepted = 1 OR id = 1)",
+            (self.nickname,)
+        )).fetchone()
+        return (user is not None)
 
-async def create_user(nickname: str, password: str, db: aiosqlite.Connection, sql: aiosqlite.Cursor | None = None) -> User:
+    async def get_id(self, db: aiosqlite.Connection) -> int | None:
+        sql = await db.cursor()
+        user = await (await sql.execute(
+            "SELECT id FROM accounts WHERE nickname = ?",
+            (self.nickname,)
+        )).fetchone()
+        if user is None:
+            return None
+        return list(user)[0]
+
+
+async def create_user(
+    nickname: str, password: str,
+    db: aiosqlite.Connection, sql: aiosqlite.Cursor | None = None,
+    accepted: bool = True
+) -> User:
     sql = sql or (await db.cursor())
     password_sha256 = sha256(password)
     await sql.execute(
-        "INSERT INTO accounts (nickname, password_sha256) VALUES (?, ?)",
-        (nickname, password_sha256)
+        "INSERT INTO accounts (nickname, password_sha256, accepted) VALUES (?, ?, ?)",
+        (nickname, password_sha256, 1 if accepted else 0)
     )
     return User(nickname, password_sha256)
 

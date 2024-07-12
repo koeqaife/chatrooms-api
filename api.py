@@ -10,7 +10,7 @@ import functions
 from redis import Redis
 import traceback
 
-VERSION = 5
+VERSION = 6
 db_manager = core.AsyncDatabaseConnectionManager()
 
 core.init_logging(logging.INFO, True, True, other_logs=True)
@@ -21,7 +21,7 @@ config = {
     "port": 1111,
     "redis": "localhost",
     "redis_port": 6379,
-    "rate_limit": 60
+    "rate_limit": 90
 }
 try:
     with open("./config.json") as f:
@@ -55,7 +55,7 @@ async def handle_exception(error):
     return jsonify(response), 500
 
 
-async def check_ip_rate_limit(_key: str | None, limit=30, interval=60):
+async def check_rate_limit(_key: str | None, limit=30, interval=60):
     # return True
     if _key is None:
         return False
@@ -76,7 +76,7 @@ async def before():
     else:
         rate_limit_bypass = None
     if not str(functions.secret_key) == rate_limit_bypass:
-        if not (await check_ip_rate_limit(client_ip, limit=config["rate_limit"])):
+        if not (await check_rate_limit(client_ip, limit=config["rate_limit"])):
             return {
                 "message": 'Rate limit exceeded',
                 "success": False,
@@ -163,11 +163,34 @@ async def create_user():
                 "success": False,
                 "message": "User already exists"
             }), 400
-        await functions.create_user(username, password, db)
+        if not (6 < len(username) < 16):
+            return jsonify({
+                "success": False,
+                "message": "Username too short or too long"
+            }), 400
+        if (len(password) < 6):
+            return jsonify({
+                "success": False,
+                "message": "Password is too short"
+            }), 400
+        await functions.create_user(username, password, db, accepted=False)
+        wait_for_accept = False
+        if not (await user.can_join(db)):
+            wait_for_accept = True
+            id = (await user.get_id(db)) or 999999
+            message = (
+                f"Someone under the nickname {username} wants to join.\n" +
+                f"Use /accept {id} to allow to join"
+            )
+            await db.execute(
+                "INSERT INTO messages (nickname, message, type) VALUES (?, ?, ?)",
+                ("system", message, functions.MessageTypes.SYSTEM)
+            )
         await db.commit()
 
     return jsonify(
         {
+            "wait_for_accept": wait_for_accept,
             "success": True
         }
     )
@@ -198,6 +221,11 @@ async def check_user():
             return jsonify({
                 "success": False,
                 "message": "Wrong password"
+            }), 403
+        if not (await user.can_join(db)):
+            return jsonify({
+                "success": False,
+                "message": "Can't access this chatroom"
             }), 403
 
     return jsonify(
@@ -232,6 +260,8 @@ async def send_message():
         type = int(data.get("type") or 1)
     except Exception:
         type = 1
+    if type == functions.MessageTypes.SYSTEM:
+        type = 1
 
     async with db_manager.connection_context(functions.room_db(room.id)) as db:
         db: aiosqlite.Connection  # type: ignore
@@ -245,19 +275,65 @@ async def send_message():
                 "success": False,
                 "message": "Wrong password"
             }), 403
+        if not (await user.can_join(db)):
+            return jsonify({
+                "success": False,
+                "message": "Can't access this chatroom"
+            }), 403
+        cmd = message.strip().lower()
 
-        encrypted_msg = await functions.encrypt_message_async(message, room.public_key, room.passphrase)
-        await db.execute(
+        def system_msg(message):
+            return {
+                "id": "-1",
+                "nickname": "system",
+                "message": message,
+                "created_at": "",
+                "type": functions.MessageTypes.EPHEMERAL,
+                "success": True
+            }
+        if cmd.startswith("/"):
+            cmd = cmd.lstrip("/").split(" ")
+            if cmd[0] == "accept":
+                if len(cmd) != 2:
+                    return jsonify(system_msg("Usage: /accept ID"))
+                if not cmd[1].isdigit():
+                    return jsonify(system_msg("Usage: /accept ID"))
+                if (await user.get_id(db)) != 1:
+                    return jsonify(system_msg("You are not owner!"))
+                await db.execute(
+                    "UPDATE accounts SET accepted = 1 WHERE id = ?",
+                    (int(cmd[1]),)
+                )
+                await db.commit()
+                return jsonify(system_msg("Now he/she can enter the chatroom and read messages"))
+
+        if type == functions.MessageTypes.NOT_ENCRYPTED:
+            encrypted_msg = message
+        else:
+            encrypted_msg = await functions.encrypt_message_async(message, room.public_key, room.passphrase)
+        cursor = await db.cursor()
+        await cursor.execute(
             "INSERT INTO messages (nickname, message, type) VALUES (?, ?, ?)",
             (user.nickname, encrypted_msg, type)
         )
+        last_row_id = cursor.lastrowid
+        id, nickname, _, created_at, type = await (await cursor.execute(
+            """
+                SELECT id, nickname, message, created_at, type
+                FROM messages
+                WHERE id = ?
+            """, (last_row_id, )
+        )).fetchone()
         await db.commit()
 
-    return jsonify(
-        {
-            "success": True
-        }
-    )
+    return jsonify({
+        "id": id,
+        "nickname": nickname,
+        "message": message,
+        "created_at": created_at,
+        "type": type,
+        "success": True
+    })
 
 
 @app.route('/get_last_messages', methods=['GET'])
@@ -299,6 +375,11 @@ async def get_last_messages():
                 "success": False,
                 "message": "Wrong password"
             }), 403
+        if not (await user.can_join(db)):
+            return jsonify({
+                "success": False,
+                "message": "Can't access this chatroom"
+            }), 403
 
         _msg_count = await db.execute("SELECT COUNT(*) FROM messages WHERE id > ?", (after,))
         msg_count = (await _msg_count.fetchone())[0]
@@ -321,13 +402,19 @@ async def get_last_messages():
 
                 async def decrypt_and_enqueue(message_data):
                     id, nickname, message, created_at, type = message_data
-                    decrypted = await loop.run_in_executor(
-                        executor,
-                        functions.decrypt_message,
-                        message,
-                        room.private_key,
-                        room.passphrase
-                    )
+                    if (
+                        type == functions.MessageTypes.NOT_ENCRYPTED
+                        or type == functions.MessageTypes.SYSTEM
+                    ):
+                        decrypted = message
+                    else:
+                        decrypted = await loop.run_in_executor(
+                            executor,
+                            functions.decrypt_message,
+                            message,
+                            room.private_key,
+                            room.passphrase
+                        )
                     await queue.put((id, nickname, decrypted, created_at, type))
 
                 tasks = [decrypt_and_enqueue(message_data) for message_data in messages_encrypted]
@@ -393,6 +480,11 @@ async def online():
                 "success": False,
                 "message": "Wrong password"
             }), 403
+        if not (await user.can_join(db)):
+            return jsonify({
+                "success": False,
+                "message": "Can't access this chatroom"
+            }), 403
 
         _online = await db.execute(
             "SELECT nickname, online_timestamp FROM online WHERE nickname = ?",
@@ -441,6 +533,11 @@ async def online_list():
             return jsonify({
                 "success": False,
                 "message": "Wrong password"
+            }), 403
+        if not (await user.can_join(db)):
+            return jsonify({
+                "success": False,
+                "message": "Can't access this chatroom"
             }), 403
 
         _online = await db.execute(
